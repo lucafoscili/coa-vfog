@@ -56,7 +56,7 @@ void CheckLightDisappearanceHistory(Harness& harness)
 
 constexpr double kLitShaderMinimumLumaGain = 0.001;
 
-void CheckRendererSwitchesLitShaders(Harness& harness)
+void CheckRendererSwitchesLitShaders(Harness& harness, const std::wstring& outDir)
 {
     Config saved;
     vf_test_get_config(&saved);
@@ -112,5 +112,38 @@ void CheckRendererSwitchesLitShaders(Harness& harness)
     Check(rendered && MeanLumaChange(frames[0], frames[2], 0, 0, world.Width, world.Height) == 0.0 &&
               MeanLumaChange(frames[1], frames[3], 0, 0, world.Width, world.Height) == 0.0,
           "renderer switching between lit and unlit shaders reproduces each frame exactly");
+    LocalLightInputs captured = input.localLights;
+    captured.pointLightCount = kMaxLocalPointLights;
+    LocalPointLightHistory history;
+    PointLightUpload upload = LocalLightUpload(config);
+    upload.fadeSeconds = 0.0f;
+    history.Update(captured, input.camPos, input.mapId, 0.0, upload, input.localLights);
+    history.Update({}, input.camPos, input.mapId, 0.1, upload, input.localLights);
+    harness.BeginFrame();
+    harness.DrawScene(eye, view, projection, world);
+    const char* skip = nullptr;
+    const bool persisted = vf_test_render(&input, &skip) != 0;
+    const Image retained = Capture(harness.dev);
+    harness.dev->EndScene();
+    harness.dev->Present(nullptr, nullptr, nullptr, nullptr);
+    Check(persisted && input.localLights.pointLightCount == kMaxLocalPointLights &&
+              MeanLumaChange(frames[0], retained, 0, 0, world.Width, world.Height) == 0.0,
+          "the GPU fog stays pixel-identical after all in-reach lamps leave raw capture at the fixed camera");
+    const Image* previews[] = {&frames[0], &frames[1], &retained};
+    const wchar_t* names[] = {L"\\lights-reported.png", L"\\lights-raw-missing.png", L"\\lights-retained.png"};
+    for (int preview = 0; preview < 3; ++preview)
+    {
+        std::vector<unsigned char> pixels(world.Width * world.Height * 4);
+        for (UINT y = 0; y < world.Height; ++y)
+            std::memcpy(pixels.data() + y * world.Width * 4, previews[preview]->At(0, y), world.Width * 4);
+        Check(SavePng(outDir + names[preview], world.Width, world.Height, pixels),
+              "local-light persistence comparison image saved");
+    }
+    input.localLights.pointLightCount = 0;
+    harness.BeginFrame();
+    harness.DrawScene(eye, view, projection, world);
+    Check(vf_test_render(&input, &skip) != 0, "local-light comparison finishes with its original unlit frame");
+    harness.dev->EndScene();
+    harness.dev->Present(nullptr, nullptr, nullptr, nullptr);
     vf_test_set_config(&saved);
 }

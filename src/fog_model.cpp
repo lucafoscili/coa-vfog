@@ -385,7 +385,7 @@ float EnergyNormalisedPhaseScale(float g)
 
 PointLightUpload LocalLightUpload(const Config& cfg)
 {
-    return {ScattersInLinearLight(cfg), cfg.localLightIntensity};
+    return {ScattersInLinearLight(cfg), cfg.localLightIntensity, cfg.localLightFadeSeconds};
 }
 
 bool AnyLayerNoise(const FogParams& fog)

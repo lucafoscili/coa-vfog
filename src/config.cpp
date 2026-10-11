@@ -67,6 +67,7 @@ const FloatSetting kFloatSettings[] = {
     {"Exposure", &Config::exposure, 0.0f, 10.0f},
     {"ClassicExposure", &Config::classicExposure, 0.0f, 10.0f},
     {"LocalLightIntensity", &Config::localLightIntensity, 0.0f, 8.0f},
+    {"LocalLightFadeSeconds", &Config::localLightFadeSeconds, 0.0f, 5.0f},
     {"LocalLightPhase", &Config::localLightPhase, -0.9f, 0.9f},
     {"InteriorDensity", &Config::interiorDensity, 0.0f, 1.0f},
     {"NoiseAmount", &Config::noiseAmount, 0.0f, 1.0f},

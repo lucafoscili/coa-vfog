@@ -130,6 +130,37 @@ bool Precedes(const LocalPointLight& a, const LocalPointLight& b, const float ca
     return false;
 }
 
+bool SameLight(const LocalPointLight& a, const LocalPointLight& b)
+{
+    constexpr double kPositionToleranceSquared = 0.01;
+    constexpr float kColorTolerance = 0.001f;
+    if (SquaredDistance(a.position, b.position) > kPositionToleranceSquared)
+        return false;
+    for (int channel = 0; channel < 3; ++channel)
+        if (std::fabs(a.color[channel] - b.color[channel]) > kColorTolerance ||
+            a.attenuation[channel] != b.attenuation[channel])
+            return false;
+    return true;
+}
+
+int FindLight(const LocalLightInputs& lights, const LocalPointLight& light)
+{
+    if (light.nativeId)
+        for (uint32_t i = 0; i < lights.pointLightCount; ++i)
+            if (lights.pointLights[i].nativeId == light.nativeId)
+                return static_cast<int>(i);
+    for (uint32_t i = 0; i < lights.pointLightCount; ++i)
+        if (SameLight(lights.pointLights[i], light))
+            return static_cast<int>(i);
+    return -1;
+}
+
+bool WithinLightReach(const LocalPointLight& light, const float cameraPosition[3])
+{
+    return light.cutoff > 0.0f &&
+           SquaredDistance(light.position, cameraPosition) <= static_cast<double>(light.cutoff) * light.cutoff;
+}
+
 template <size_t Size>
 bool Matches(uintptr_t address, const unsigned char (&expected)[Size])
 {
@@ -304,6 +335,146 @@ LocalLightCapture CapturePointLightTableGuarded(uintptr_t sceneSlot, const float
         return LocalLightCapture::ReadFault;
     }
 }
+}
+
+void LocalPointLightHistory::Remember(const LocalPointLight& light, const float cameraPosition[3], double seconds)
+{
+    if (light.nativeId)
+        for (CachedLight& cached : m_cache)
+            if (cached.occupied && cached.light.nativeId == light.nativeId)
+            {
+                cached = {light, seconds, true};
+                return;
+            }
+    CachedLight* destination = nullptr;
+    for (CachedLight& cached : m_cache)
+    {
+        if (cached.occupied && SameLight(cached.light, light))
+        {
+            cached = {light, seconds, true};
+            return;
+        }
+        if (!cached.occupied)
+            destination = &cached;
+    }
+    if (!destination)
+    {
+        destination = &m_cache[0];
+        for (CachedLight& cached : m_cache)
+            if (Precedes(destination->light, cached.light, cameraPosition))
+                destination = &cached;
+        if (!Precedes(light, destination->light, cameraPosition))
+            return;
+    }
+    *destination = {light, seconds, true};
+}
+
+void LocalPointLightHistory::Select(const LocalLightInputs& captured, const float cameraPosition[3], double seconds,
+                                   const PointLightUpload& upload, LocalLightInputs& selected)
+{
+    for (CachedLight& cached : m_cache)
+    {
+        if (!cached.occupied)
+            continue;
+        engine::UploadedPointLightColor(cached.light.color, upload, cached.light.uploadedColor);
+        cached.light.cutoff = engine::PointLightCutoff(cached.light.uploadedColor, cached.light.attenuation);
+        if (seconds - cached.lastRelevant >= kLocalPointLightExpirySeconds)
+            cached.occupied = false;
+        else if (WithinLightReach(cached.light, cameraPosition))
+            cached.lastRelevant = seconds;
+    }
+    LocalLightInputs valid;
+    for (uint32_t i = 0; i < std::min(captured.pointLightCount, kMaxLocalPointLights); ++i)
+        if (captured.pointLights[i].enabled)
+            engine::SelectLocalPointLight(valid, captured.pointLights[i], cameraPosition, upload);
+    for (uint32_t i = 0; i < valid.pointLightCount; ++i)
+        Remember(valid.pointLights[i], cameraPosition, seconds);
+    for (const CachedLight& cached : m_cache)
+        if (cached.occupied && (WithinLightReach(cached.light, cameraPosition) || FindLight(valid, cached.light) >= 0))
+            engine::SelectLocalPointLight(selected, cached.light, cameraPosition, upload);
+}
+
+void LocalPointLightHistory::Fade(const LocalLightInputs& selected, double elapsed, const PointLightUpload& upload,
+                                 LocalLightInputs& out)
+{
+    const double duration = std::isfinite(upload.fadeSeconds) ? std::max(upload.fadeSeconds, 0.0f) : 0.4;
+    double availableSeconds[kMaxLocalPointLights];
+    bool assigned[kMaxLocalPointLights] = {};
+    for (uint32_t i = 0; i < kMaxLocalPointLights; ++i)
+    {
+        UploadedLight& slot = m_uploaded[i];
+        availableSeconds[i] = elapsed;
+        if (!slot.occupied)
+            continue;
+        const int selectedIndex = FindLight(selected, slot.light);
+        if (selectedIndex >= 0 && !assigned[selectedIndex])
+        {
+            slot.light = selected.pointLights[selectedIndex];
+            assigned[selectedIndex] = true;
+            slot.weight = duration > 0.0 ? std::min(1.0, slot.weight + elapsed / duration) : 1.0;
+        }
+        else
+        {
+            availableSeconds[i] = std::max(0.0, elapsed - slot.weight * duration);
+            slot.weight = duration > 0.0 ? std::max(0.0, slot.weight - elapsed / duration) : 0.0;
+            if (slot.weight <= 0.0)
+                slot = {};
+        }
+    }
+    for (uint32_t index = 0; index < selected.pointLightCount; ++index)
+    {
+        if (assigned[index])
+            continue;
+        for (uint32_t i = 0; i < kMaxLocalPointLights; ++i)
+        {
+            UploadedLight& slot = m_uploaded[i];
+            if (slot.occupied)
+                continue;
+            slot = {selected.pointLights[index],
+                    duration > 0.0 ? std::min(1.0, availableSeconds[i] / duration) : 1.0, true};
+            break;
+        }
+    }
+    out.pointLightCount = 0;
+    for (const UploadedLight& slot : m_uploaded)
+    {
+        if (!slot.occupied || slot.weight <= 0.0)
+            continue;
+        LocalPointLight& light = out.pointLights[out.pointLightCount++];
+        light = slot.light;
+        engine::UploadedPointLightColor(light.color, upload, light.uploadedColor);
+        light.cutoff = engine::PointLightCutoff(light.uploadedColor, light.attenuation);
+        const float intensity = static_cast<float>(slot.weight * slot.weight * (3.0 - 2.0 * slot.weight));
+        for (float& channel : light.uploadedColor)
+            channel *= intensity;
+    }
+}
+
+void LocalPointLightHistory::Update(const LocalLightInputs& captured, const float cameraPosition[3], int mapId,
+                                   double seconds, const PointLightUpload& upload, LocalLightInputs& out)
+{
+    if (captured.capture != LocalLightCapture::Captured || !std::isfinite(seconds) ||
+        !ValidVector(cameraPosition, -kMaxWorldCoordinate, kMaxWorldCoordinate))
+    {
+        *this = {};
+        out = captured;
+        out.pointLightCount = 0;
+        return;
+    }
+    if (m_initialized && (m_mapId != mapId || seconds < m_seconds ||
+                          seconds - m_seconds > kLocalPointLightExpirySeconds ||
+                          SquaredDistance(m_cameraPosition, cameraPosition) >=
+                              kLocalPointLightTeleportDistance * kLocalPointLightTeleportDistance))
+        *this = {};
+    const double elapsed = m_initialized ? seconds - m_seconds : 0.0;
+    LocalLightInputs selected;
+    Select(captured, cameraPosition, seconds, upload, selected);
+    out = captured;
+    Fade(selected, elapsed, upload, out);
+    std::memcpy(m_cameraPosition, cameraPosition, sizeof(m_cameraPosition));
+    m_mapId = mapId;
+    m_seconds = seconds;
+    m_initialized = true;
 }
 
 namespace engine

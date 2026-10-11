@@ -427,6 +427,24 @@ Engine notes behind the code:
   `0x7AEA83` and `0x7F1931`. Reads are SEH-guarded with pointer, span and count limits (512 nodes per bucket,
   8192 in total, links checked against their owner); no client references survive the capture, and invalid
   inputs give an empty result. `LocalLights=0` skips the point-light walk.
+- Local-light continuity (`src/engine_lights.cpp`). Raw capture rebuilds the nearest/brightest eight from the
+  linked table on every call; there is no view-direction term in its priority. The fixed-camera harness fixture
+  unlinks a lamp to simulate view culling and confirms raw uploads fall from two to one in one capture, with
+  the remaining lamp unchanged. This reproduces the fog-side failure mechanism; it does not establish native
+  frustum culling or the reported Deck brightness change without an in-game capture.
+  Frame acquisition keeps a bounded 32-light history of those reported candidates. Position (within 0.1 yd),
+  colour (within 0.001 per channel) and attenuation identify a returning lamp; a still-reported native source
+  can animate its position/colour without restarting its fade. Stored addresses are identities only, never
+  dereferenced. A missing light remains eligible while the camera is within its unfaded `PointLightCutoff`;
+  outside that reach it fades out and expires after two seconds without a report or an in-reach observation.
+  Map changes, camera jumps of at least 100 yd and capture gaps longer than two seconds discard history.
+  Invalid captures also clear it. Water-only frame reads do not advance this history.
+  Selection still uses unfaded uploaded brightness and camera distance. Departing lights retain their upload
+  slots until they fade to zero, then replacements ease in; at most eight contribute throughout. The envelope
+  advances by elapsed seconds and uses smoothstep, with the unfaded cutoff held during the fade. This keeps
+  shader scattering and the transparent-fog fit on the same faded colours. `LocalLightFadeSeconds=0` disables
+  fading while retaining nearby history. There is no discovery of lamps the client has never reported, and a
+  lamp disabled while still in reach is indistinguishable from a culled lamp until history is cleared.
 - Water pass. `0x77F020` jumps to `0x790A80`, which calls the liquid renderer `0x8A2240` at `0x790AA2`
   (`E8 99 17 11 00`) with ECX = `[0xCD8610]` (`0x790A91`), the camera `0xCD8F5C` and pass 1 (`0x790A9B`, `6A 01`);
   it is a thiscall that returns with `ret 8` (`0x8A2376`). The same `0x77F020` runs from `0x4F9170` (camera above
@@ -610,6 +628,7 @@ describe every key. In the game, `Ctrl+F7` opens the same settings in a window (
 | `ClassicExposure` | 1 | Brightness of the Classic layers (1 = as authored) |
 | `ClassicPhase` | 0 | Classic sun and moon scattering: 0 phase peaks at 1 toward the light, 1 energy-normalised |
 | `LocalLights`, `LocalLightIntensity` | 1, 1 | Scatter up to eight nearby world point lights; intensity 0..8 |
+| `LocalLightFadeSeconds` | 0.4 | Local-light fade duration, 0..5 seconds; 0 disables fading, not persistence |
 | `LocalLightPhase` | 0.3 | Henyey–Greenstein g of every point light in the fog, −0.9..0.9 (a calibration) |
 | `InteriorAware`, `InteriorDensity` | 1, 0.15 | Fade outdoor layers indoors, keeping this fraction of their density |
 | `GodRays` | 0 | Radial sky rays, 0 = off |

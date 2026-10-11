@@ -404,6 +404,12 @@ bool BuildFrameInputsUnsafe(FrameInputs& out, bool withPointLights, const PointL
     out.mapId = Read<int32_t>(kCurrentMap);
     out.lightParams = ReadLightParamsSelection();
     CaptureLocalLightInputs(out.camPos, withPointLights, upload, out.localLights);
+    if (withPointLights)
+    {
+        static LocalPointLightHistory history;
+        const LocalLightInputs captured = out.localLights;
+        history.Update(captured, out.camPos, out.mapId, GetTickCount64() * 0.001, upload, out.localLights);
+    }
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
     out.clientGlowAmount = out.inLiquid ? 0.0f : GlowScreenEffectAmount();

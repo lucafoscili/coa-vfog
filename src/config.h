@@ -43,6 +43,7 @@ struct Config
     float classicExposure = 1.0f;
     bool localLights = true;
     float localLightIntensity = 1.0f;
+    float localLightFadeSeconds = 0.4f;
     float localLightPhase = 0.3f;
     bool interiorAware = true;
     float interiorDensity = 0.15f;

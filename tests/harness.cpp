@@ -1388,6 +1388,7 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
     edited.density = 2.5f;
     edited.temporal = 0.5f;
     edited.localLights = !shipped.localLights;
+    edited.localLightFadeSeconds = 0.7f;
     edited.farClipMax = 900.0f;
     edited.debugView = 2;
     edited.godRays = 99.0f;
@@ -1402,6 +1403,7 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
     reloaded.Load(NarrowPath(savedIni));
     const Config& r = reloaded.Get();
     Check(SameLiveSettings(r, applied) && r.quality == 3 && r.density == 2.5f && r.farClipMax == 900.0f &&
+              r.localLightFadeSeconds == 0.7f &&
               r.localLights == edited.localLights && r.enable == shipped.enable && r.overlay == shipped.overlay,
           "saved settings reload unchanged and the restart-only keys stay as they were");
     const std::string text = ReadText(savedIni);
@@ -1959,6 +1961,12 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     CheckFogIntegration(h.dev);
     CheckLocalLightInputs();
     CheckPointLightTableCapture();
+    CheckViewCulledPointLightCapture();
+    CheckMissingPointLightsPersist();
+    CheckPointLightFades();
+    CheckPointLightHistoryExpiry();
+    CheckPointLightSelectionFades();
+    CheckAnimatedPointLightHistory();
     CheckHdrLocalLightColours();
     CheckInteriorFogInputs();
     CheckNoiseVariation(h.dev);
@@ -2356,7 +2364,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     vf_test_set_config(&restored);
 
     runtime_cost::CheckDisabledTemporalSkipsHistoryPasses(h, eye, at, proj, resized);
-    CheckRendererSwitchesLitShaders(h);
+    CheckRendererSwitchesLitShaders(h, outDir);
     authored_noise::CheckRendererDrawsStormNoise(h);
     runtime_cost::CheckFrameSummaryLogsClassicExtras(h);
     runtime_cost::CheckLocalLightLogLines(h);

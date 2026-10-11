@@ -194,6 +194,248 @@ void CheckPointLightTableCapture()
           "a scene pointer into unmapped memory is a read fault, and no scene is an empty capture, not a rejection");
 }
 
+void CheckViewCulledPointLightCapture()
+{
+    auto table = std::make_unique<PointLightTable>();
+    LinkPointLightTable(*table);
+    LocalLightInputs before;
+    LocalLightInputs turned;
+    const bool captured = CaptureTable(*table, before) == LocalLightCapture::Captured;
+    table->lights[0].next = 0;
+    const bool recaptured = CaptureTable(*table, turned) == LocalLightCapture::Captured;
+    std::printf("     fixed camera, simulated view cull: native/uploaded lights %u -> %u; "
+                "remaining lamp x %.1f -> %.1f\n", before.pointLightCount, turned.pointLightCount,
+                before.pointLights[0].position[0], turned.pointLights[0].position[0]);
+    Check(captured && recaptured && before.pointLightCount == 2 && turned.pointLightCount == 1 &&
+              before.pointLights[0].nativeId == turned.pointLights[0].nativeId,
+          "at a fixed camera a lamp unlinked by simulated view culling disappears from raw capture in one frame");
+}
+
+LocalLightInputs CapturedLight(float x)
+{
+    const float camera[3] = {};
+    LocalLightInputs captured;
+    engine::SelectLocalPointLight(captured, PointLightFixture(x), camera, {});
+    return captured;
+}
+
+float UploadedRedAt(const LocalLightInputs& lights, float x)
+{
+    for (uint32_t i = 0; i < lights.pointLightCount; ++i)
+        if (lights.pointLights[i].position[0] == x)
+            return lights.pointLights[i].uploadedColor[0];
+    return 0.0f;
+}
+
+void CheckMissingPointLightsPersist()
+{
+    auto table = std::make_unique<PointLightTable>();
+    LinkPointLightTable(*table);
+    const float camera[3] = {};
+    const PointLightUpload immediate = {true, 1.0f, 0.0f};
+    LocalPointLightHistory history;
+    LocalLightInputs captured;
+    LocalLightInputs uploaded;
+    CaptureTable(*table, captured);
+    history.Update(captured, camera, 0, 0.0, immediate, uploaded);
+    table->lights[0].next = 0;
+    bool persists = uploaded.pointLightCount == 2;
+    for (int frame = 1; frame <= 300; ++frame)
+    {
+        CaptureTable(*table, captured);
+        history.Update(captured, camera, 0, frame / 60.0, immediate, uploaded);
+        persists = persists && uploaded.pointLightCount == 2 && UploadedRedAt(uploaded, 20.0f) == 1.0f;
+    }
+    Check(persists && captured.pointLightCount == 1,
+          "a view-culled lamp stays uploaded beyond the expiry time while the fixed camera remains in reach");
+    LinkPointLightTable(*table);
+    CaptureTable(*table, captured);
+    captured.pointLights[1].nativeId += 4;
+    history.Update(captured, camera, 0, 5.1, {}, uploaded);
+    Check(uploaded.pointLightCount == 2 && UploadedRedAt(uploaded, 20.0f) == 1.0f,
+          "relinking a position/colour under another native address neither duplicates nor restarts its fade");
+}
+
+void CheckPointLightFades()
+{
+    const float nearCamera[3] = {};
+    const float farCamera[3] = {25.0f, 0.0f, 0.0f};
+    const LocalLightInputs captured = CapturedLight(0.0f);
+    const PointLightUpload upload = {true, 1.0f, 0.4f};
+    bool monotonic = true;
+    bool independent = true;
+    for (int rate : {20, 60, 120})
+    {
+        LocalPointLightHistory history;
+        LocalLightInputs uploaded;
+        history.Update(captured, nearCamera, 0, 0.0, upload, uploaded);
+        float previous = 0.0f;
+        for (int frame = 1; frame <= rate * 2 / 5; ++frame)
+        {
+            history.Update(captured, nearCamera, 0, static_cast<double>(frame) / rate, upload, uploaded);
+            const float red = UploadedRedAt(uploaded, 0.0f);
+            monotonic = monotonic && red >= previous && red <= 1.0f;
+            if (frame == rate / 5)
+                independent = independent && LocalNear(red, 0.5f);
+            previous = red;
+        }
+        independent = independent && LocalNear(previous, 1.0f);
+        history.Update({}, farCamera, 0, 0.4, upload, uploaded);
+        for (int frame = 1; frame <= rate * 2 / 5; ++frame)
+        {
+            history.Update({}, farCamera, 0, 0.4 + static_cast<double>(frame) / rate, upload, uploaded);
+            const float red = UploadedRedAt(uploaded, 0.0f);
+            monotonic = monotonic && red <= previous && red >= 0.0f;
+            if (frame == rate / 5)
+                independent = independent && LocalNear(red, 0.5f);
+            previous = red;
+        }
+        independent = independent && LocalNear(previous, 0.0f);
+    }
+    Check(monotonic && independent,
+          "uploaded intensity eases monotonically in/out in 0.4 s with matching midpoints at 20/60/120 fps");
+    LocalPointLightHistory irregular;
+    LocalLightInputs uploaded;
+    irregular.Update(captured, nearCamera, 0, 0.0, upload, uploaded);
+    for (double seconds : {0.013, 0.09, 0.11, 0.2})
+        irregular.Update(captured, nearCamera, 0, seconds, upload, uploaded);
+    const bool halfIn = LocalNear(UploadedRedAt(uploaded, 0.0f), 0.5f);
+    irregular.Update({}, farCamera, 0, 0.3, upload, uploaded);
+    const bool reverses = LocalNear(UploadedRedAt(uploaded, 0.0f), 0.15625f);
+    irregular.Update({}, farCamera, 0, 0.4, upload, uploaded);
+    Check(halfIn && reverses && LocalNear(UploadedRedAt(uploaded, 0.0f), 0.0f),
+          "irregular frame intervals preserve the fade and a half-lit light can reverse continuously");
+    LocalPointLightHistory immediate;
+    immediate.Update(captured, nearCamera, 0, 0.0, {true, 1.0f, 0.0f}, uploaded);
+    const bool full = UploadedRedAt(uploaded, 0.0f) == 1.0f;
+    immediate.Update({}, farCamera, 0, 0.1, {true, 1.0f, 0.0f}, uploaded);
+    Check(full && uploaded.pointLightCount == 0, "LocalLightFadeSeconds=0 disables both fade directions");
+}
+
+void CheckPointLightHistoryExpiry()
+{
+    const float nearCamera[3] = {};
+    const float farCamera[3] = {25.0f, 0.0f, 0.0f};
+    const float teleported[3] = {150.0f, 0.0f, 0.0f};
+    const PointLightUpload immediate = {true, 1.0f, 0.0f};
+    const LocalLightInputs captured = CapturedLight(0.0f);
+    LocalPointLightHistory history;
+    LocalLightInputs uploaded;
+    history.Update({}, nearCamera, 0, 0.0, immediate, uploaded);
+    const bool noInvented = uploaded.pointLightCount == 0;
+    history.Update(captured, nearCamera, 0, 0.1, immediate, uploaded);
+    history.Update({}, farCamera, 0, 0.5, immediate, uploaded);
+    history.Update({}, nearCamera, 0, 1.0, immediate, uploaded);
+    const bool returned = uploaded.pointLightCount == 1;
+    for (double seconds : {1.5, 2.0, 2.5})
+        history.Update({}, farCamera, 0, seconds, immediate, uploaded);
+    history.Update({}, nearCamera, 0, 3.2, immediate, uploaded);
+    Check(noInvented && returned && uploaded.pointLightCount == 0,
+          "only reported lights persist; a missing light expires after two seconds outside its cutoff");
+    history.Update(captured, nearCamera, 0, 3.3, immediate, uploaded);
+    history.Update({}, nearCamera, 1, 3.4, immediate, uploaded);
+    const bool mapCleared = uploaded.pointLightCount == 0;
+    history.Update(captured, nearCamera, 1, 3.5, immediate, uploaded);
+    history.Update({}, teleported, 1, 3.6, immediate, uploaded);
+    history.Update({}, nearCamera, 1, 3.7, immediate, uploaded);
+    const bool jumpCleared = uploaded.pointLightCount == 0;
+    history.Update(captured, nearCamera, 1, 3.8, immediate, uploaded);
+    history.Update({}, nearCamera, 1, 7.0, immediate, uploaded);
+    Check(mapCleared && jumpCleared && uploaded.pointLightCount == 0,
+          "map changes, 100-yard camera jumps and capture gaps clear lights from the previous scene");
+    history.Update(captured, nearCamera, 1, 7.1, immediate, uploaded);
+    LocalLightInputs rejected;
+    rejected.capture = LocalLightCapture::DamagedTable;
+    history.Update(rejected, nearCamera, 1, 7.2, immediate, uploaded);
+    const bool rejectedCleared = uploaded.pointLightCount == 0 && uploaded.capture == rejected.capture;
+    history.Update({}, nearCamera, 1, 7.3, immediate, uploaded);
+    Check(rejectedCleared && uploaded.pointLightCount == 0, "rejected capture clears history and keeps its reason");
+}
+
+void CheckPointLightSelectionFades()
+{
+    const float camera[3] = {};
+    LocalLightInputs initial;
+    for (uint32_t i = 0; i < kMaxLocalPointLights; ++i)
+        engine::SelectLocalPointLight(initial, PointLightFixture(static_cast<float>(i)), camera, {});
+    LocalPointLight bright = PointLightFixture(10.0f);
+    bright.color[0] = 100.0f;
+    LocalLightInputs replacement;
+    engine::SelectLocalPointLight(replacement, bright, camera, {});
+    bool bounded = true;
+    bool independent = true;
+    for (int rate : {20, 60, 120})
+    {
+        LocalPointLightHistory history;
+        LocalLightInputs uploaded;
+        history.Update(initial, camera, 0, 0.0, {true, 1.0f, 0.0f}, uploaded);
+        float previousOutgoing = 1.0f;
+        float previousIncoming = 0.0f;
+        for (int frame = 1; frame <= rate; ++frame)
+        {
+            history.Update(replacement, camera, 0, static_cast<double>(frame) / rate, {}, uploaded);
+            const float outgoing = UploadedRedAt(uploaded, 7.0f);
+            const float incoming = UploadedRedAt(uploaded, 10.0f);
+            bounded = bounded && uploaded.pointLightCount <= kMaxLocalPointLights &&
+                      outgoing <= previousOutgoing && incoming >= previousIncoming;
+            if (frame == rate / 5)
+                independent = independent && LocalNear(outgoing, 0.5f) && incoming == 0.0f;
+            if (frame == rate * 3 / 5)
+                independent = independent && outgoing == 0.0f && LocalNear(incoming, 50.0f);
+            previousOutgoing = outgoing;
+            previousIncoming = incoming;
+        }
+        independent = independent && uploaded.pointLightCount == kMaxLocalPointLights &&
+                      LocalNear(UploadedRedAt(uploaded, 10.0f), 100.0f);
+    }
+    Check(bounded && independent,
+          "priority replacement fades out the weakest lamp before admitting its successor, never exceeding eight");
+    LocalPointLightHistory crowded;
+    LocalLightInputs uploaded;
+    for (uint32_t i = 0; i < kLocalPointLightCacheSize * 2; ++i)
+        crowded.Update(CapturedLight(static_cast<float>(i) * 0.1f), camera, 0, i * 0.01,
+                       {true, 1.0f, 0.0f}, uploaded);
+    crowded.Update({}, camera, 0, 1.0, {true, 1.0f, 0.0f}, uploaded);
+    Check(uploaded.pointLightCount == kMaxLocalPointLights && UploadedRedAt(uploaded, 0.0f) == 1.0f &&
+              UploadedRedAt(uploaded, 6.3f) == 0.0f,
+          "a full bounded cache preserves priority when more reported lamps arrive than it can hold");
+}
+
+void CheckAnimatedPointLightHistory()
+{
+    const float camera[3] = {};
+    LocalPointLightHistory history;
+    LocalLightInputs captured = CapturedLight(0.0f);
+    captured.pointLights[0].nativeId = 123;
+    LocalLightInputs uploaded;
+    history.Update(captured, camera, 0, 0.0, {}, uploaded);
+    bool continuous = true;
+    for (int frame = 1; frame <= 24; ++frame)
+    {
+        LocalPointLight& light = captured.pointLights[0];
+        light.position[0] = frame * 0.2f;
+        light.color[0] = 1.0f - frame * 0.01f;
+        history.Update(captured, camera, 0, frame / 60.0, {}, uploaded);
+        const double weight = frame / 24.0;
+        const float expected = static_cast<float>(std::pow(light.color[0], kLocalLightGamma) *
+                                                   weight * weight * (3.0 - 2.0 * weight));
+        continuous = continuous && uploaded.pointLightCount == 1 &&
+                     LocalNear(UploadedRedAt(uploaded, light.position[0]), expected);
+    }
+    Check(continuous, "a reported light can animate colour and position without restarting its fade or trailing");
+    LocalPointLightHistory distinct;
+    LocalLightInputs pair = CapturedLight(0.0f);
+    pair.pointLights[0].nativeId = 100;
+    pair.pointLights[1] = pair.pointLights[0];
+    pair.pointLights[1].nativeId = 200;
+    pair.pointLights[1].attenuation[2] = 0.5f;
+    pair.pointLightCount = 2;
+    distinct.Update(pair, camera, 0, 0.0, {true, 1.0f, 0.0f}, uploaded);
+    Check(uploaded.pointLightCount == 2 &&
+              uploaded.pointLights[0].attenuation[2] != uploaded.pointLights[1].attenuation[2],
+          "coincident lights with different attenuation keep their distinct reported contributions");
+}
+
 constexpr float kStatueGreen = 255.0f;
 constexpr float kStatueRed = 65.9f;
 constexpr float kLinearGamma = 2.2f;
@@ -353,18 +595,22 @@ void CheckInteriorFogInputs()
     ConfigStore settings;
     Config edited = settings.Get();
     edited.localLightIntensity = 20.0f;
+    edited.localLightFadeSeconds = 20.0f;
     edited.localLightPhase = 2.0f;
     edited.interiorDensity = -1.0f;
     edited.localLights = false;
     edited.interiorAware = false;
     settings.Apply(edited);
-    Check(settings.Get().localLightIntensity == 8.0f && settings.Get().localLightPhase == 0.9f &&
+    Check(settings.Get().localLightIntensity == 8.0f && settings.Get().localLightFadeSeconds == 5.0f &&
+              settings.Get().localLightPhase == 0.9f &&
               settings.Get().interiorDensity == 0.0f && !settings.Get().localLights &&
               !settings.Get().interiorAware && settings.HasUnsavedChanges(),
           "local-light and interior controls clamp and participate in live-setting changes");
     edited.localLightPhase = -2.0f;
     settings.Apply(edited);
     Config shipped;
+    Check(shipped.localLightFadeSeconds == 0.4f && LocalLightUpload(shipped).fadeSeconds == 0.4f,
+          "the default local-light fade reaches frame acquisition through the existing upload settings");
     Config phased = shipped;
     phased.localLightPhase = 0.5f;
     Check(settings.Get().localLightPhase == -0.9f && shipped.localLightPhase == 0.3f &&
