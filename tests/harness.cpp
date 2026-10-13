@@ -1969,6 +1969,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     CheckAnimatedPointLightHistory();
     CheckHdrLocalLightColours();
     CheckInteriorFogInputs();
+    CheckStormHidesTheSun();
     CheckNoiseVariation(h.dev);
     authored_noise::CheckAuthoredNoiseOnTheGpu(h.dev);
     classic_phase::CheckIsotropicSlabSaturation(h.dev);
@@ -2904,6 +2905,11 @@ int wmain(int argc, wchar_t** argv)
             if (i + 2 < argc && argv[i + 2][0] != L'-')
                 out = argv[i + 2];
         }
+    }
+    if (scene == L"storm")
+    {
+        CheckStormHidesTheSun();
+        return g_failures ? 1 : 0;
     }
     if (scene == L"interior")
     {

@@ -292,6 +292,12 @@ bool HaloHue(const AuthoredFog& fog, float* displayReferredRgb)
     return true;
 }
 
+float StormSunVisibility(const FrameInputs& in)
+{
+    const float storm = in.lightParams.stormBlend;
+    return std::isfinite(storm) ? 1.0f - std::clamp(storm, 0.0f, 1.0f) : 1.0f;
+}
+
 float InteriorWeight(const FrameInputs& in, const Config& cfg)
 {
     return cfg.interiorAware && in.localLights.cameraInterior && std::isfinite(in.localLights.interiorBlend)
@@ -348,7 +354,7 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     Encode(p.lightColor, p.linear);
 
     float elevation = SmoothStep(-0.03f, 0.10f, in.toLight[2]);
-    p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLightScale : 1.0f);
+    p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLightScale : 1.0f) * StormSunVisibility(in);
     p.lightAboveHorizon = SmoothStep(-kLightSettingHalfWidth, kLightSettingHalfWidth, in.toLight[2]);
     p.farClip = in.farClip;
     p.maxDistance = std::max(cfg.maxDistance, in.farClip);

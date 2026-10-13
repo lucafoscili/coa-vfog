@@ -647,3 +647,25 @@ void CheckInteriorFogInputs()
               SettingChanges(shipped, phased) == "LocalLightPhase 0.3 -> 0.5",
           "LocalLightPhase defaults to 0.3, clamps to -0.9..0.9, discards fog history and logs its changes");
 }
+
+void CheckStormHidesTheSun()
+{
+    Config config;
+    FrameInputs input = InteriorFogFixture();
+    const FogParams clear = BuildFogParams(input, config, nullptr);
+    input.lightParams.stormBlend = 0.5f;
+    const FogParams half = BuildFogParams(input, config, nullptr);
+    input.lightParams.stormBlend = 1.0f;
+    const FogParams full = BuildFogParams(input, config, nullptr);
+    input.lightParams.stormBlend = 2.0f;
+    const FogParams beyond = BuildFogParams(input, config, nullptr);
+    input.lightParams.stormBlend = InvalidLocalLightFloat();
+    const FogParams invalid = BuildFogParams(input, config, nullptr);
+    Check(clear.lightVisibility > 0.0f && LocalNear(half.lightVisibility, clear.lightVisibility * 0.5f) &&
+              full.lightVisibility == 0.0f && beyond.lightVisibility == 0.0f &&
+              LocalNear(invalid.lightVisibility, clear.lightVisibility),
+          "a storm hides direct sunlight continuously with its weight; nonfinite weights leave it unchanged");
+    Check(LocalNear(full.layers[0].density, clear.layers[0].density) &&
+              LocalNear(full.layers[kDistanceFogLayer].density, clear.layers[kDistanceFogLayer].density),
+          "hiding the sun leaves fog density to the storm's light tables");
+}
