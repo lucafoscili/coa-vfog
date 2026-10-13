@@ -70,6 +70,7 @@ const FloatSetting kFloatSettings[] = {
     {"LocalLightFadeSeconds", &Config::localLightFadeSeconds, 0.0f, 5.0f},
     {"LocalLightPhase", &Config::localLightPhase, -0.9f, 0.9f},
     {"InteriorDensity", &Config::interiorDensity, 0.0f, 1.0f},
+    {"InteriorFarFog", &Config::interiorFarFog, 0.0f, 1.0f},
     {"NoiseAmount", &Config::noiseAmount, 0.0f, 1.0f},
     {"NoiseScale", &Config::noiseScale, 0.001f, 1.0f},
     {"NoiseWindSpeed", &Config::noiseWindSpeed, 0.0f, 10.0f},

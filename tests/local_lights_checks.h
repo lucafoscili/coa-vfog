@@ -559,11 +559,29 @@ void CheckInteriorFogInputs()
                     inside.layers[i].diffuse[channel] == 0.0f;
     Check(fades && inside.lightVisibility == 0.0f && LocalNear(middle.lightVisibility, 0.5f),
           "interior transitions continuously reduce outdoor density and direct sunlight");
-    Check(LocalNear(inside.layers[kDistanceFogLayer].density, outside.layers[kDistanceFogLayer].density) &&
+    Check(LocalNear(inside.layers[kDistanceFogLayer].density, outside.layers[kDistanceFogLayer].density * 0.4f) &&
+              LocalNear(middle.layers[kDistanceFogLayer].density, outside.layers[kDistanceFogLayer].density * 0.7f) &&
               LocalNear(inside.layers[kDistanceFogLayer].emissive[2], outside.layers[kDistanceFogLayer].emissive[2]) &&
               inside.farLimit == input.fogEnd,
           "interior transitions preserve the native WMO distance-fog colour and range");
 
+    for (float retained : {0.0f, 0.4f, 1.0f, -1.0f, 2.0f, InvalidLocalLightFloat()})
+    {
+        config.interiorFarFog = retained;
+        const float expected = std::isfinite(retained) ? std::clamp(retained, 0.0f, 1.0f) : 0.4f;
+        input.localLights.interiorBlend = 1.0f;
+        const FogParams full = BuildFogParams(input, config, nullptr);
+        input.localLights.interiorBlend = 0.5f;
+        const FogParams half = BuildFogParams(input, config, nullptr);
+        Check(LocalNear(full.layers[kDistanceFogLayer].density,
+                        outside.layers[kDistanceFogLayer].density * expected) &&
+                  LocalNear(half.layers[kDistanceFogLayer].density,
+                            outside.layers[kDistanceFogLayer].density * (1.0f + expected) * 0.5f) &&
+                  LocalNear(full.layers[0].density, inside.layers[0].density),
+              "InteriorFarFog clamps, fades continuously and leaves scene-layer density independent");
+    }
+    config.interiorFarFog = 0.4f;
+    input.localLights.interiorBlend = 1.0f;
     config.interiorAware = false;
     const FogParams disabled = BuildFogParams(input, config, nullptr);
     config.interiorAware = true;
@@ -571,7 +589,9 @@ void CheckInteriorFogInputs()
     const FogParams invalid = BuildFogParams(input, config, nullptr);
     Check(LocalNear(disabled.layers[0].density, outside.layers[0].density) &&
               LocalNear(disabled.layers[0].diffuse[0], outside.layers[0].diffuse[0]) &&
-              LocalNear(invalid.layers[0].density, outside.layers[0].density),
+              LocalNear(invalid.layers[0].density, outside.layers[0].density) &&
+              LocalNear(disabled.layers[kDistanceFogLayer].density, outside.layers[kDistanceFogLayer].density) &&
+              LocalNear(invalid.layers[kDistanceFogLayer].density, outside.layers[kDistanceFogLayer].density),
           "interior bypass and nonfinite transition weights preserve outdoor fog");
 
     AuthoredFog authored = {};
@@ -598,17 +618,26 @@ void CheckInteriorFogInputs()
     edited.localLightFadeSeconds = 20.0f;
     edited.localLightPhase = 2.0f;
     edited.interiorDensity = -1.0f;
+    edited.interiorFarFog = 2.0f;
     edited.localLights = false;
     edited.interiorAware = false;
     settings.Apply(edited);
     Check(settings.Get().localLightIntensity == 8.0f && settings.Get().localLightFadeSeconds == 5.0f &&
               settings.Get().localLightPhase == 0.9f &&
-              settings.Get().interiorDensity == 0.0f && !settings.Get().localLights &&
+              settings.Get().interiorDensity == 0.0f && settings.Get().interiorFarFog == 1.0f &&
+              !settings.Get().localLights &&
               !settings.Get().interiorAware && settings.HasUnsavedChanges(),
           "local-light and interior controls clamp and participate in live-setting changes");
+    edited.interiorFarFog = -1.0f;
     edited.localLightPhase = -2.0f;
     settings.Apply(edited);
     Config shipped;
+    Config farEdited = shipped;
+    farEdited.interiorFarFog = 0.8f;
+    Check(settings.Get().interiorFarFog == 0.0f && shipped.interiorFarFog == 0.4f &&
+              !SameFogSettings(shipped, farEdited) &&
+              SettingChanges(shipped, farEdited) == "InteriorFarFog 0.4 -> 0.8",
+          "InteriorFarFog defaults to 0.4, clamps to 0..1, discards fog history and logs its changes");
     Check(shipped.localLightFadeSeconds == 0.4f && LocalLightUpload(shipped).fadeSeconds == 0.4f,
           "the default local-light fade reaches frame acquisition through the existing upload settings");
     Config phased = shipped;
